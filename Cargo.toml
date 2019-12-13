@@ -9,26 +9,20 @@ version = "0.1.0"
 embedded-hal = "0.2.3"
 cortex-m = "0.6.1"
 cortex-m-rt = "0.6.10"
+alloc-cortex-m = "0.3.5"
 cortex-m-rtfm = "0.5.1"
+
 lis3dsh = { git = "https://github.com/JosephBGerber/lis3dsh-rs" }
+accelerometer = "0.10.0"
 
 cortex-m-semihosting = "0.3.5"
 
 # panic-halt = "0.2.0"
 panic-semihosting = "0.5.3"
 
-accelerometer = "0.10.0"
-
-alloc-cortex-m = "0.3.5"
-
-[dependencies.stm32f4]
-version = "0.9.0"
-features = ["stm32f407"]
-
 [dependencies.stm32f4xx-hal]
 version = "0.6.0"
-features = ["stm32f407"]
-
+features = ["stm32f407", "rt"]
 
 [[bin]]
 name = "blinker"

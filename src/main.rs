@@ -1,41 +1,43 @@
-#![feature(alloc_error_handler)]
 #![no_std]
 #![no_main]
-
 #![allow(dead_code, unused_variables, unused_imports, unused_mut)]
 
-extern crate alloc;
-use alloc::boxed::Box;
-use alloc_cortex_m::CortexMHeap;
-
-#[global_allocator]
-static ALLOCATOR: CortexMHeap = CortexMHeap::empty();
-
-use panic_semihosting;
 use cortex_m_semihosting::{debug, hprintln};
+use panic_semihosting;
 
 use cortex_m;
-use stm32f4xx_hal as hal;
 use embedded_hal;
 use rtfm::app;
+use stm32f4xx_hal as hal;
 
-use crate::hal::{prelude::*, stm32, spi, gpio::{self, ExtiPin}};
-use stm32::Interrupt;
+use crate::hal::{gpio, interrupt, prelude::*, spi, stm32, timer};
+use gpio::{ExtiPin, Input, Output};
+use stm32::EXTI;
+use timer::{Event, Timer};
 
-use lis3dsh::{LIS3DSH, I16x3};
+use lis3dsh::LIS3DSH;
 use accelerometer::Accelerometer;
-type Alternate5 = gpio::Alternate<gpio::AF5>;
-type SPI = spi::Spi<stm32::SPI1, (gpio::gpioa::PA5<Alternate5>, gpio::gpioa::PA6<Alternate5>, gpio::gpioa::PA7<Alternate5>)>;
-type CS =  gpio::gpioe::PE3<gpio::Output<gpio::PushPull>>;
 
-mod flash;
+type Alternate = gpio::Alternate<gpio::AF5>;
+type SPI = spi::Spi<
+    stm32::SPI1,
+    (
+        gpio::gpioa::PA5<Alternate>,
+        gpio::gpioa::PA6<Alternate>,
+        gpio::gpioa::PA7<Alternate>,
+    ),
+>;
+type CS = gpio::gpioe::PE3<Output<gpio::PushPull>>;
 
 #[app(device = stm32f4xx_hal::stm32, peripherals = true)]
 const APP: () = {
     struct Resources {
-        #[init(0)]
-        presses: usize,
+        exti: EXTI,
+        int1: gpio::gpioe::PE0<Input<gpio::PullDown>>,
+        green: gpio::gpiod::PD12<Output<gpio::PushPull>>,
+        blue: gpio::gpiod::PD15<Output<gpio::PushPull>>,
         accelerometer: LIS3DSH<SPI, CS>,
+        timer: Timer<stm32::TIM2>,
     }
 
     #[init]
@@ -43,80 +45,106 @@ const APP: () = {
         let mut core: cortex_m::Peripherals = cx.core;
         let device: stm32::Peripherals = cx.device;
 
+        // Unsafe usage of RCC_APB2EN register to enable SYSCFGEN clock
+        // Required to configure EXTI0 register
+        let rcc_register_block = unsafe { &(*stm32::RCC::ptr()) };
+        rcc_register_block.apb2enr.modify(|_, w| {
+            w.syscfgen().set_bit()
+        });
 
-        let start = cortex_m_rt::heap_start() as usize;
-        let size = 1024 * 28;
-        unsafe { ALLOCATOR.init(start, size) }
-
-        unsafe { cortex_m::peripheral::NVIC::unmask(stm32::Interrupt::EXTI0); }
-
+        let rcc = device.RCC.constrain();
+        let clocks = rcc.cfgr.sysclk(26_000_000.hz()).freeze();
 
         let gpioa = device.GPIOA.split();
-        let mut user = gpioa.pa0.into_floating_input();
         let sck = gpioa.pa5.into_alternate_af5();
         let miso = gpioa.pa6.into_alternate_af5();
         let mosi = gpioa.pa7.into_alternate_af5();
 
+        let pins = (sck, miso, mosi);
+
+        let spi = spi::Spi::spi1(
+            device.SPI1,
+            pins,
+            embedded_hal::spi::MODE_3,
+            5_000_000.hz(),
+            clocks,
+        );
+
+        let gpiod = device.GPIOD.split();
+        let green = gpiod.pd12.into_push_pull_output();
+        let blue = gpiod.pd15.into_push_pull_output();
+
         let gpioe = device.GPIOE.split();
-        let mut pe0 = gpioe.pe0.into_floating_input();
+        let mut int1 = gpioe.pe0.into_pull_down_input();
         let cs = gpioe.pe3.into_push_pull_output();
 
-        let rcc = device.RCC.constrain();
-        let clocks = rcc.cfgr.freeze();
+        let mut accelerometer = LIS3DSH::new(spi, cs).unwrap();
+        accelerometer.enable_dr_interrupt().unwrap();
+
+        let data = accelerometer.acceleration().unwrap();
+
+        hprintln!("{:?}", data).unwrap();
 
         let mut syscfg = device.SYSCFG;
         let mut exti = device.EXTI;
-        // pe0.make_interrupt_source(&mut syscfg);
-        // pe0.enable_interrupt(&mut exti);
-        // pe0.trigger_on_edge(&mut exti, hal::gpio::Edge::RISING);
-        // rtfm::pend(stm32::Interrupt::EXT0);
+        let tim2 = device.TIM2;
 
+        let mut tim2 = Timer::tim2(tim2, 1.hz(), clocks);
+        tim2.listen(Event::TimeOut);
 
-        // user.make_interrupt_source(&mut syscfg);
-        // user.enable_interrupt(&mut exti);
-        // user.trigger_on_edge(&mut exti, hal::gpio::Edge::RISING);
-        
-        
-        let pins = (sck, miso, mosi);
-        let spi = hal::spi::Spi::spi1(device.SPI1, pins, embedded_hal::spi::MODE_3, 4_000_000.hz(), clocks);
+        int1.make_interrupt_source(&mut syscfg);
+        int1.enable_interrupt(&mut exti);
+        int1.trigger_on_edge(&mut exti, gpio::Edge::RISING);
 
-        let mut accelerometer= LIS3DSH::new(spi, cs).unwrap();
-        accelerometer.enable_dr_interrupt().unwrap();
-        let data = accelerometer.acceleration().unwrap();
-        accelerometer.calibrate_acceleration(data).unwrap();
-
-        hprintln!("INIT").unwrap();
-
-        init::LateResources{accelerometer}
-    }
-
-    #[idle]
-    fn idle(_: idle::Context) -> ! {
-        hprintln!("IDLE").unwrap();
-        
-        loop {
-            rtfm::pend(stm32::Interrupt::EXTI0);
+        init::LateResources {
+            exti,
+            int1,
+            green,
+            blue,
+            accelerometer,
+            timer: tim2,
         }
     }
 
-    #[task(binds = EXTI0, resources = [presses, accelerometer])]
+    #[task(binds = EXTI0, resources = [exti, accelerometer, int1, blue])]
     fn exti0(cx: exti0::Context) {
-        // let accelerometer = cx.resources.accelerometer;
+        let mut exti = cx.resources.exti;
+        let mut accelerometer = cx.resources.accelerometer;
+        let mut int1 = cx.resources.int1;
+        let mut blue = cx.resources.blue;
 
-        // let acceleration = accelerometer.acceleration().unwrap();
+        int1.clear_interrupt_pending_bit(&mut exti);
 
-        // if acceleration.x > 30000 {
-        //     hprintln!("Whoa slow down skippy.").unwrap();
-        // }
+        hprintln!("EXTI0").unwrap();
 
-        let presses: &mut usize = cx.resources.presses;
-        *presses += 1;
-        hprintln!("User pressed {} time(s)!",*presses).unwrap();
+        let data = accelerometer.acceleration().unwrap();
+
+        if data.x.abs() > 100 {
+            blue.set_high().unwrap();
+        } else {
+            blue.set_low().unwrap();
+        }
+
+
+    }
+
+    #[task(binds = TIM2, resources = [timer, green])]
+    fn tim2(cx: tim2::Context) {
+        static mut STATE: bool = true;
+
+        let mut timer = cx.resources.timer;
+        let mut green = cx.resources.green;
+
+        timer.clear_interrupt(Event::TimeOut);
+
+        if *STATE {
+            green.set_high().unwrap();
+            *STATE = false;
+        } else {
+            green.set_low().unwrap();
+            *STATE = true;
+        }
+
+
     }
 };
-
-
-#[alloc_error_handler]
-pub fn rust_oom(_: core::alloc::Layout) -> ! {
-    panic!("OUT OF MEMORY");
-}
