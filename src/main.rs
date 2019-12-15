@@ -10,25 +10,18 @@ use embedded_hal;
 use rtfm::app;
 use stm32f4xx_hal as hal;
 
-use crate::hal::{gpio, interrupt, prelude::*, spi, stm32, timer};
+use crate::hal::{delay, gpio, i2c, interrupt, prelude::*, stm32, timer};
 use gpio::{ExtiPin, Input, Output};
 use stm32::EXTI;
 use timer::{Event, Timer};
 
-use lis3dsh::LIS3DSH;
-use accelerometer::Accelerometer;
+use mpu6050::{Mpu6050, Steps};
 
-type Alternate = gpio::Alternate<gpio::AF5>;
-type SPI = spi::Spi<
-    stm32::SPI1,
-    (
-        gpio::gpioa::PA5<Alternate>,
-        gpio::gpioa::PA6<Alternate>,
-        gpio::gpioa::PA7<Alternate>,
-    ),
->;
+type Alternate = gpio::Alternate<gpio::AF4>;
+type I2C = i2c::I2c<stm32::I2C1, (gpio::gpiob::PB6<Alternate>, gpio::gpiob::PB7<Alternate>)>;
 type CS = gpio::gpioe::PE3<Output<gpio::PushPull>>;
 
+/// # Safety this binary must be run on the stm32f407
 #[app(device = stm32f4xx_hal::stm32, peripherals = true)]
 const APP: () = {
     struct Resources {
@@ -36,7 +29,7 @@ const APP: () = {
         int1: gpio::gpioe::PE0<Input<gpio::PullDown>>,
         green: gpio::gpiod::PD12<Output<gpio::PushPull>>,
         blue: gpio::gpiod::PD15<Output<gpio::PushPull>>,
-        accelerometer: LIS3DSH<SPI, CS>,
+        mpu: Mpu6050<I2C, delay::Delay>,
         timer: Timer<stm32::TIM2>,
     }
 
@@ -48,27 +41,22 @@ const APP: () = {
         // Unsafe usage of RCC_APB2EN register to enable SYSCFGEN clock
         // Required to configure EXTI0 register
         let rcc_register_block = unsafe { &(*stm32::RCC::ptr()) };
-        rcc_register_block.apb2enr.modify(|_, w| {
-            w.syscfgen().set_bit()
-        });
+        rcc_register_block
+            .apb2enr
+            .modify(|_, w| w.syscfgen().set_bit());
 
+        let syst = core.SYST;
         let rcc = device.RCC.constrain();
-        let clocks = rcc.cfgr.sysclk(26_000_000.hz()).freeze();
+        let clocks = rcc.cfgr.sysclk(28_000_000.hz()).freeze();
 
-        let gpioa = device.GPIOA.split();
-        let sck = gpioa.pa5.into_alternate_af5();
-        let miso = gpioa.pa6.into_alternate_af5();
-        let mosi = gpioa.pa7.into_alternate_af5();
+        let gpioa = device.GPIOB.split();
+        let scl = gpioa.pb6.into_alternate_af4();
+        let sda = gpioa.pb7.into_alternate_af4();
 
-        let pins = (sck, miso, mosi);
+        let pins = (scl, sda);
 
-        let spi = spi::Spi::spi1(
-            device.SPI1,
-            pins,
-            embedded_hal::spi::MODE_3,
-            5_000_000.hz(),
-            clocks,
-        );
+        let i2c = i2c::I2c::i2c1(device.I2C1, pins, 100.khz(), clocks);
+        let delay = delay::Delay::new(syst, clocks);
 
         let gpiod = device.GPIOD.split();
         let green = gpiod.pd12.into_push_pull_output();
@@ -76,20 +64,23 @@ const APP: () = {
 
         let gpioe = device.GPIOE.split();
         let mut int1 = gpioe.pe0.into_pull_down_input();
-        let cs = gpioe.pe3.into_push_pull_output();
 
-        let mut accelerometer = LIS3DSH::new(spi, cs).unwrap();
-        accelerometer.enable_dr_interrupt().unwrap();
+        let mut mpu = Mpu6050::new(i2c, delay);
+        mpu.init().unwrap();
+        mpu.soft_calib(Steps(100)).unwrap();
+        mpu.calc_variance(Steps(50)).unwrap();
 
-        let data = accelerometer.acceleration().unwrap();
+        mpu.write_u8(0x38, 0x01).unwrap();
 
-        hprintln!("{:?}", data).unwrap();
+        if let Ok(data) = mpu.get_acc() {
+            hprintln!("{:?}", data).unwrap();
+        }
 
         let mut syscfg = device.SYSCFG;
         let mut exti = device.EXTI;
         let tim2 = device.TIM2;
 
-        let mut tim2 = Timer::tim2(tim2, 1.hz(), clocks);
+        let mut tim2 = Timer::tim2(tim2, 5.hz(), clocks);
         tim2.listen(Event::TimeOut);
 
         int1.make_interrupt_source(&mut syscfg);
@@ -101,31 +92,28 @@ const APP: () = {
             int1,
             green,
             blue,
-            accelerometer,
+            mpu,
             timer: tim2,
         }
     }
 
-    #[task(binds = EXTI0, resources = [exti, accelerometer, int1, blue])]
+    #[task(binds = EXTI0, resources = [exti, mpu, int1, blue])]
     fn exti0(cx: exti0::Context) {
         let mut exti = cx.resources.exti;
-        let mut accelerometer = cx.resources.accelerometer;
+        let mut mpu = cx.resources.mpu;
         let mut int1 = cx.resources.int1;
         let mut blue = cx.resources.blue;
 
         int1.clear_interrupt_pending_bit(&mut exti);
 
         hprintln!("EXTI0").unwrap();
-
-        let data = accelerometer.acceleration().unwrap();
-
-        if data.x.abs() > 100 {
-            blue.set_high().unwrap();
-        } else {
-            blue.set_low().unwrap();
+        if let Ok(data) = mpu.get_acc() {
+            if data.x > 100.0 || data.x < -100.0 {
+                blue.set_high().unwrap();
+            } else {
+                blue.set_low().unwrap();
+            }
         }
-
-
     }
 
     #[task(binds = TIM2, resources = [timer, green])]
@@ -144,7 +132,5 @@ const APP: () = {
             green.set_low().unwrap();
             *STATE = true;
         }
-
-
     }
 };
