@@ -1,6 +1,10 @@
 #![no_std]
 #![no_main]
-#![allow(dead_code, unused_variables, unused_imports, unused_mut)]
+#![feature(lang_items)]
+#![allow(dead_code, unused_variables, unused_imports, unused_mut, clippy::missing_safety_doc)]
+
+extern crate alloc;
+use alloc::boxed::Box;
 
 use cortex_m_semihosting::{debug, hprintln};
 use panic_semihosting;
@@ -10,27 +14,43 @@ use embedded_hal;
 use rtfm::app;
 use stm32f4xx_hal as hal;
 
-use crate::hal::{delay, gpio, i2c, interrupt, prelude::*, stm32, timer};
+use alloc_cortex_m::CortexMHeap;
+
+#[global_allocator]
+static ALLOCATOR: CortexMHeap = CortexMHeap::empty();
+
+use crate::hal::{gpio, interrupt, prelude::*, spi, stm32, timer};
 use gpio::{ExtiPin, Input, Output};
 use stm32::EXTI;
 use timer::{Event, Timer};
 
-use mpu6050::{Mpu6050, Steps};
+mod graphics;
+use graphics::Display;
 
-type Alternate = gpio::Alternate<gpio::AF4>;
-type I2C = i2c::I2c<stm32::I2C1, (gpio::gpiob::PB6<Alternate>, gpio::gpiob::PB7<Alternate>)>;
-type CS = gpio::gpioe::PE3<Output<gpio::PushPull>>;
+type Alternate = gpio::Alternate<gpio::AF5>;
+type SPI = spi::Spi<
+    stm32::SPI1,
+    (
+        gpio::gpioa::PA5<Alternate>,
+        gpio::gpioa::PA6<Alternate>,
+        gpio::gpioa::PA7<Alternate>,
+    ),
+>;
 
-/// # Safety this binary must be run on the stm32f407
+// # Safety - only use on the stm32f407 mcu
 #[app(device = stm32f4xx_hal::stm32, peripherals = true)]
 const APP: () = {
     struct Resources {
         exti: EXTI,
         int1: gpio::gpioe::PE0<Input<gpio::PullDown>>,
+        timer: Timer<stm32::TIM2>,
+
+        user: gpio::gpioa::PA0<Input<gpio::PullDown>>,
         green: gpio::gpiod::PD12<Output<gpio::PushPull>>,
         blue: gpio::gpiod::PD15<Output<gpio::PushPull>>,
-        mpu: Mpu6050<I2C, delay::Delay>,
-        timer: Timer<stm32::TIM2>,
+
+        spi: SPI,
+        display: Display,
     }
 
     #[init]
@@ -38,25 +58,38 @@ const APP: () = {
         let mut core: cortex_m::Peripherals = cx.core;
         let device: stm32::Peripherals = cx.device;
 
+        // Initialize the heap
+        let start = cortex_m_rt::heap_start() as usize;
+        let size = 2048;
+        unsafe { ALLOCATOR.init(start, size) };
+
         // Unsafe usage of RCC_APB2EN register to enable SYSCFGEN clock
         // Required to configure EXTI0 register
-        let rcc_register_block = unsafe { &(*stm32::RCC::ptr()) };
-        rcc_register_block
-            .apb2enr
-            .modify(|_, w| w.syscfgen().set_bit());
+        let rcc = unsafe { &(*stm32::RCC::ptr()) };
+        rcc.apb2enr.modify(|_, w| w.syscfgen().set_bit());
 
-        let syst = core.SYST;
+        // Take the rcc peripheral
         let rcc = device.RCC.constrain();
         let clocks = rcc.cfgr.sysclk(28_000_000.hz()).freeze();
 
-        let gpioa = device.GPIOB.split();
-        let scl = gpioa.pb6.into_alternate_af4();
-        let sda = gpioa.pb7.into_alternate_af4();
+        let gpioa = device.GPIOA.split();
+        let user = gpioa.pa0.into_pull_down_input();
+        let sck = gpioa.pa5.into_alternate_af5();
+        let miso = gpioa.pa6.into_alternate_af5();
+        let mosi = gpioa.pa7.into_alternate_af5();
 
-        let pins = (scl, sda);
+        let pins = (sck, miso, mosi);
+        let spi = spi::Spi::spi1(
+            device.SPI1,
+            pins,
+            embedded_hal::spi::MODE_3,
+            500_000.hz(),
+            clocks,
+        );
 
-        let i2c = i2c::I2c::i2c1(device.I2C1, pins, 100.khz(), clocks);
-        let delay = delay::Delay::new(syst, clocks);
+        let cs = Box::from(gpioa.pa10.into_push_pull_output());
+        let en = Box::from(gpioa.pa11.into_push_pull_output());
+        let display = Display::new(cs, en);
 
         let gpiod = device.GPIOD.split();
         let green = gpiod.pd12.into_push_pull_output();
@@ -64,56 +97,38 @@ const APP: () = {
 
         let gpioe = device.GPIOE.split();
         let mut int1 = gpioe.pe0.into_pull_down_input();
-
-        let mut mpu = Mpu6050::new(i2c, delay);
-        mpu.init().unwrap();
-        mpu.soft_calib(Steps(100)).unwrap();
-        mpu.calc_variance(Steps(50)).unwrap();
-
-        mpu.write_u8(0x38, 0x01).unwrap();
-
-        if let Ok(data) = mpu.get_acc() {
-            hprintln!("{:?}", data).unwrap();
-        }
+        let cs = gpioe.pe3.into_push_pull_output();
 
         let mut syscfg = device.SYSCFG;
         let mut exti = device.EXTI;
         let tim2 = device.TIM2;
 
-        let mut tim2 = Timer::tim2(tim2, 5.hz(), clocks);
-        tim2.listen(Event::TimeOut);
-
         int1.make_interrupt_source(&mut syscfg);
         int1.enable_interrupt(&mut exti);
         int1.trigger_on_edge(&mut exti, gpio::Edge::RISING);
 
+        let mut tim2 = Timer::tim2(tim2, 30.hz(), clocks);
+        tim2.listen(Event::TimeOut);
+
         init::LateResources {
             exti,
             int1,
+            timer: tim2,
+            user,
             green,
             blue,
-            mpu,
-            timer: tim2,
+            spi,
+            display,
         }
     }
 
-    #[task(binds = EXTI0, resources = [exti, mpu, int1, blue])]
+    #[task(binds = EXTI0, resources = [exti, int1, blue])]
     fn exti0(cx: exti0::Context) {
         let mut exti = cx.resources.exti;
-        let mut mpu = cx.resources.mpu;
         let mut int1 = cx.resources.int1;
-        let mut blue = cx.resources.blue;
+        //let mut blue = cx.resources.blue;
 
         int1.clear_interrupt_pending_bit(&mut exti);
-
-        hprintln!("EXTI0").unwrap();
-        if let Ok(data) = mpu.get_acc() {
-            if data.x > 100.0 || data.x < -100.0 {
-                blue.set_high().unwrap();
-            } else {
-                blue.set_low().unwrap();
-            }
-        }
     }
 
     #[task(binds = TIM2, resources = [timer, green])]
@@ -134,3 +149,9 @@ const APP: () = {
         }
     }
 };
+
+#[lang = "oom"]
+#[no_mangle]
+pub fn rust_oom(_: core::alloc::Layout) -> ! {
+    panic!("OUT OF MEMORY")
+}

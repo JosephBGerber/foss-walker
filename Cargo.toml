@@ -13,7 +13,6 @@ alloc-cortex-m = "0.3.5"
 cortex-m-rtfm = "0.5.1"
 
 # lis3dsh = { git = "https://github.com/JosephBGerber/lis3dsh-rs" }
-mpu6050 = "0.1.3"
 accelerometer = "0.10.0"
 
 cortex-m-semihosting = "0.3.5"
