@@ -1,8 +1,7 @@
 MEMORY
 {
   /* NOTE 1 K = 1 KiBi = 1024 bytes */
-  FLASH : ORIGIN = 0x08000000, LENGTH = 896K
-  SECTOR_11: ORIGIN = 0x080E0000, LENGTH = 128K
+  FLASH : ORIGIN = 0x08000000, LENGTH = 1024K
   RAM : ORIGIN = 0x20000000, LENGTH = 128K
   CCRAM: ORIGIN = 0x10000000, LENGTH = 64K
 }
@@ -10,7 +9,7 @@ MEMORY
 /* This is where the call stack will be allocated. */
 /* The stack is of the full descending type. */
 /* You may want to use this variable to locate the call stack and static
-   variables in different memory regions. Below is shown the default value */
+   variables in different memory regions. */
 _stack_start = ORIGIN(CCRAM) + LENGTH(CCRAM);
 
 /* You can use this symbol to customize the location of the .text section */

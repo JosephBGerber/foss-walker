@@ -6,23 +6,14 @@ name = "blinker"
 version = "0.1.0"
 
 [dependencies]
-embedded-hal = "0.2.3"
-cortex-m = "0.6.1"
-cortex-m-rt = "0.6.10"
-alloc-cortex-m = "0.3.5"
-cortex-m-rtfm = "0.5.1"
-
-# lis3dsh = { git = "https://github.com/JosephBGerber/lis3dsh-rs" }
-accelerometer = "0.10.0"
-
+alloc-cortex-m = { git = "https://github.com/rust-embedded/alloc-cortex-m" }
+cortex-m = "0.6.2"
+cortex-m-rt = "0.6.12"
 cortex-m-semihosting = "0.3.5"
-
+embedded-hal = "0.2.3"
 # panic-halt = "0.2.0"
 panic-semihosting = "0.5.3"
-
-[dependencies.stm32f4xx-hal]
-version = "0.6.0"
-features = ["stm32f407", "rt"]
+stm32f4xx-hal = { version = "0.8.0", features = ["stm32f407", "rt"] }
 
 [[bin]]
 name = "blinker"
