@@ -2,7 +2,7 @@
 authors = ["joseph <josephbgerber@gmail.com>"]
 edition = "2018"
 readme = "README.md"
-name = "blinker"
+name = "foss-walker"
 version = "0.1.0"
 
 [dependencies]
@@ -11,12 +11,18 @@ cortex-m = "0.6.2"
 cortex-m-rt = "0.6.12"
 cortex-m-semihosting = "0.3.5"
 embedded-hal = "0.2.3"
+flash-eeprom = { git = "https://github.com/JosephBGerber/flash-eeprom" }
 # panic-halt = "0.2.0"
 panic-semihosting = "0.5.3"
-stm32f4xx-hal = { version = "0.8.0", features = ["stm32f407", "rt"] }
+stm32f4xx-hal = { version = "0.8.0", features = ["stm32f407", "rt", "usb_fs"] }
+usb-device = "0.2.5"
+usbd-serial = "0.1.0"
+
+[build-dependencies]
+image = "0.23.4"
 
 [[bin]]
-name = "blinker"
+name = "foss-walker"
 test = false
 bench = false
 
