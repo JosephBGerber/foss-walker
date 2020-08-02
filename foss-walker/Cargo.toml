@@ -11,15 +11,15 @@ cortex-m = "0.6.2"
 cortex-m-rt = "0.6.12"
 cortex-m-semihosting = "0.3.5"
 embedded-hal = "0.2.3"
+engine = { path = "../engine" }
 flash-eeprom = { git = "https://github.com/JosephBGerber/flash-eeprom" }
 # panic-halt = "0.2.0"
+nb = "0.1.2"
 panic-semihosting = "0.5.3"
-stm32f4xx-hal = { version = "0.8.0", features = ["stm32f407", "rt", "usb_fs"] }
-usb-device = "0.2.5"
-usbd-serial = "0.1.0"
+stm32f4xx-hal = { version = "0.8.0", features = ["stm32f411", "rt"] }
 
 [build-dependencies]
-image = "0.23.4"
+#image = "0.23.4"
 
 [[bin]]
 name = "foss-walker"
